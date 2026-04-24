@@ -38,8 +38,8 @@ const PLUGIN_PATH = path.resolve(
 
 // --- Fixtures ---------------------------------------------------------------
 
-function mkTmpDir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "autopilot-test-"));
+function mkTmpDir(prefix = "autopilot-test-") {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
 function rmTmpDir(dir) {
@@ -126,6 +126,77 @@ do a thing
 test("countUnchecked: zero when no Acceptance criteria section", async () => {
     const { countUnchecked } = await import(PLUGIN_PATH);
     assert.equal(countUnchecked("# Plan\n## Goal\nnothing here\n"), 0);
+});
+
+// --- findPlanPath regex coverage ------------------------------------------
+//
+// The regex in src/plugins/autopilot.ts was broadened to match both the
+// legacy per-worktree `.agent/plans/<slug>.md` shape and the new absolute
+// repo-shared shape (`~/.glorious/opencode/<repo>/plans/<slug>.md` or any
+// `$GLORIOUS_PLAN_DIR` override). These tests lock in both branches plus
+// the negative case (non-plan paths that superficially look similar).
+
+function msgWithText(role, text) {
+    return { info: { role }, parts: [{ type: "text", text }] };
+}
+
+test("findPlanPath: legacy `.agent/plans/<slug>.md` reference", async () => {
+    const { findPlanPath } = await import(PLUGIN_PATH);
+    const messages = [msgWithText("user", "see .agent/plans/fix-bug.md for the plan")];
+    assert.equal(findPlanPath(messages), ".agent/plans/fix-bug.md");
+});
+
+test("findPlanPath: absolute repo-shared path is matched", async () => {
+    const { findPlanPath } = await import(PLUGIN_PATH);
+    const messages = [
+        msgWithText(
+            "user",
+            "plan is at /Users/alice/.glorious/opencode/my-repo/plans/fix-bug.md",
+        ),
+    ];
+    const match = findPlanPath(messages);
+    assert.ok(match, "expected a match");
+    assert.ok(
+        match.endsWith("/my-repo/plans/fix-bug.md"),
+        `expected path to end with /my-repo/plans/fix-bug.md, got ${match}`,
+    );
+});
+
+test("findPlanPath: env-override absolute path under a custom base", async () => {
+    const { findPlanPath } = await import(PLUGIN_PATH);
+    const messages = [
+        msgWithText(
+            "user",
+            "written to /opt/custom/plan-root/glorious-opencode/plans/migration.md",
+        ),
+    ];
+    const match = findPlanPath(messages);
+    assert.ok(match);
+    assert.ok(
+        match.endsWith("/glorious-opencode/plans/migration.md"),
+        `got ${match}`,
+    );
+});
+
+test("findPlanPath: returns null when no plan reference exists", async () => {
+    const { findPlanPath } = await import(PLUGIN_PATH);
+    const messages = [
+        msgWithText("user", "hello"),
+        msgWithText("assistant", "hi — no plan yet"),
+    ];
+    assert.equal(findPlanPath(messages), null);
+});
+
+test("findPlanPath: ignores superficially similar non-plan paths", async () => {
+    const { findPlanPath } = await import(PLUGIN_PATH);
+    // `plans/raw.md` without a repo-folder segment before it → NOT a match.
+    // `/tmp/plans/` (two slashes, no repo folder) → NOT a match.
+    // These would all be false positives for a too-loose regex.
+    const messages = [
+        msgWithText("assistant", "see plans/raw.md for details"),
+        msgWithText("assistant", "not `/plans/orphan.md`"),
+    ];
+    assert.equal(findPlanPath(messages), null);
 });
 
 test("detectActivation: empty messages => false", async () => {
@@ -423,6 +494,166 @@ test("session.idle: DONE promise in autopilot → verifier prompt", async () => 
       assert.equal(state.sessions.s1.verification_pending, true);
       assert.equal(state.sessions.s1.enabled, true);
     } finally {
+      rmTmpDir(dir);
+    }
+});
+
+// --- Fallback-string coverage for AUTOPILOT_VERIFICATION_PROMPT /
+// AUTOPILOT_COMPLETE_MESSAGE (a5 in the plan-storage migration plan) ------
+//
+// When autopilot sees `<promise>DONE</promise>` but can't find a plan
+// reference in the chat AND has no cached `lastPlanPath` in state, the
+// fallback string used to be the literal `".agent/plans/<slug>.md"`.
+// Post-migration it is `"<plan-path>"` — a template placeholder the
+// orchestrator resolves via `bunx @glrs-dev/harness-opencode plan-dir`
+// rather than a hardcoded legacy path.
+
+test("DONE verifier prompt: default-fallback path uses absolute ~/.glorious/opencode/<repo>/plans/<slug>.md shape", async () => {
+    // NB the test name retains the plan's wording for traceability.
+    // Practically, the fallback is the `<plan-path>` template (not a
+    // literal absolute path), because the plugin can't resolve the
+    // repo-shared plan dir from the event context without shelling out.
+    // The template signals the orchestrator to do the resolution.
+    const { default: factory } = await import(PLUGIN_PATH);
+    const dir = mkTmpDir();
+    try {
+      // User message activates autopilot but contains NO plan reference.
+      // Assistant later emits `<promise>DONE</promise>`. No lastPlanPath
+      // in state yet (fresh session).
+      const messages = [
+        userMsg("/autopilot do the thing"),
+        assistantMsg(
+          "All acceptance criteria satisfied.\n\n<promise>DONE</promise>",
+        ),
+      ];
+      const client = mockClientWithMessages(messages);
+      const handlers = await factory({ client, directory: dir });
+      await handlers.event({
+        event: { type: "session.idle", properties: { sessionID: "s1" } },
+      });
+      assert.equal(client.prompts.length, 1);
+      // Fallback must be the `<plan-path>` template, not the legacy
+      // `.agent/plans/<slug>.md` literal.
+      assert.match(
+        client.prompts[0].text,
+        /plan path `<plan-path>`/,
+        "verifier prompt must use <plan-path> template when no plan reference found",
+      );
+      assert.ok(
+        !client.prompts[0].text.includes(".agent/plans/<slug>.md"),
+        "legacy literal must not appear in fallback",
+      );
+    } finally {
+      rmTmpDir(dir);
+    }
+});
+
+test("AUTOPILOT_COMPLETE_MESSAGE: default-fallback path uses absolute shape", async () => {
+    // Same scenario one iteration later: verifier has already returned
+    // [AUTOPILOT_VERIFIED]; now the COMPLETE_MESSAGE fires. Its fallback
+    // must also use `<plan-path>` (no legacy literal).
+    const { default: factory } = await import(PLUGIN_PATH);
+    const dir = mkTmpDir();
+    try {
+      // Pre-seed state: autopilot enabled, verification_pending=true,
+      // no lastPlanPath.
+      writeFixture(
+        dir,
+        ".agent/autopilot-state.json",
+        JSON.stringify({
+          sessions: {
+            s1: {
+              iterations: 3,
+              verification_pending: true,
+              enabled: true,
+              lastNudgeAt: 0,
+            },
+          },
+        }),
+      );
+      // Messages show autopilot active, DONE emitted, verifier VERIFIED.
+      const messages = [
+        userMsg("/autopilot do the thing"),
+        assistantMsg(
+          "All acceptance criteria satisfied.\n\n<promise>DONE</promise>",
+        ),
+        assistantMsg("[AUTOPILOT_VERIFIED]"),
+      ];
+      const client = mockClientWithMessages(messages);
+      const handlers = await factory({ client, directory: dir });
+      await handlers.event({
+        event: { type: "session.idle", properties: { sessionID: "s1" } },
+      });
+      assert.equal(client.prompts.length, 1);
+      assert.match(
+        client.prompts[0].text,
+        /\/ship <plan-path>/,
+        "COMPLETE_MESSAGE must use <plan-path> template",
+      );
+      assert.ok(
+        !client.prompts[0].text.includes(".agent/plans/<slug>.md"),
+        "legacy literal must not appear in fallback",
+      );
+    } finally {
+      rmTmpDir(dir);
+    }
+});
+
+test("existing DONE promise test (cached lastPlanPath wins) still uses cached value unchanged", async () => {
+    // Regression: when state.sessions.s1.lastPlanPath is set, the
+    // fallback chain (findPlanPath → lastPlanPath → "<plan-path>") must
+    // surface the cached value verbatim. This locks in the contract
+    // that `lastPlanPath` is never overridden by the new template.
+    const { default: factory } = await import(PLUGIN_PATH);
+    const dir = mkTmpDir();
+    // Use a tmp-rooted absolute path so the fixture works under sandboxed
+    // test runners that can't write to arbitrary /Users subdirs.
+    const planRoot = mkTmpDir("autopilot-cached-plan-");
+    try {
+      const cachedPath = path.join(planRoot, "my-repo", "plans", "cached.md");
+      writeFixture(
+        dir,
+        ".agent/autopilot-state.json",
+        JSON.stringify({
+          sessions: {
+            s1: {
+              iterations: 2,
+              lastPlanPath: cachedPath,
+              verification_pending: false,
+              enabled: true,
+              lastNudgeAt: 0,
+            },
+          },
+        }),
+      );
+      // The plan file must exist at the cached absolute path — the plugin
+      // reads it to check for DONE conditions.
+      fs.mkdirSync(path.dirname(cachedPath), { recursive: true });
+      fs.writeFileSync(cachedPath, "# Cached\n## Acceptance criteria\n- [x] a\n");
+      // Messages: DONE promise but NO plan reference → fallback to
+      // lastPlanPath.
+      const messages = [
+        userMsg("/autopilot continue"),
+        assistantMsg(
+          "All acceptance criteria satisfied.\n\n<promise>DONE</promise>",
+        ),
+      ];
+      const client = mockClientWithMessages(messages);
+      const handlers = await factory({ client, directory: dir });
+      await handlers.event({
+        event: { type: "session.idle", properties: { sessionID: "s1" } },
+      });
+      assert.equal(client.prompts.length, 1);
+      assert.ok(
+        client.prompts[0].text.includes(cachedPath),
+        `expected verifier prompt to contain cached path ${cachedPath}, got: ${client.prompts[0].text}`,
+      );
+      assert.ok(
+        !client.prompts[0].text.includes("<plan-path>"),
+        "template placeholder must NOT appear when cached lastPlanPath exists",
+      );
+    } finally {
+      rmTmpDir(planRoot);
       rmTmpDir(dir);
     }
 });
@@ -1386,4 +1617,160 @@ test("AUTOPILOT_STAGNATION_EXIT_MESSAGE: contains threshold count and EXIT instr
       /\/autopilot/,
       "should explain how to re-enable autopilot on a new session",
     );
+});
+
+// --- Absolute plan-path integration (repo-shared plan storage) -----------
+//
+// Plans now live at `~/.glorious/opencode/<repo>/plans/<slug>.md` rather
+// than in a per-worktree `.agent/plans/` dir. The plugin must handle this
+// shape end-to-end: `findPlanPath` matches the absolute form (a4), and the
+// runtime reader uses `path.isAbsolute` to decide whether to anchor against
+// the worktree dir or pass through as-is. These tests pin that flow down.
+
+test("session.idle: autopilot on absolute plan path → one nudge", async () => {
+    const { default: factory } = await import(PLUGIN_PATH);
+    const worktreeDir = mkTmpDir();
+    const planRootDir = mkTmpDir("autopilot-plan-root-");
+    try {
+      // Absolute plan path under a fake `~/.glorious/opencode/<repo>/plans/` layout.
+      const absPlanPath = path.join(
+        planRootDir,
+        "my-repo",
+        "plans",
+        "absolute-fix.md",
+      );
+      fs.mkdirSync(path.dirname(absPlanPath), { recursive: true });
+      fs.writeFileSync(
+        absPlanPath,
+        `# Fix absolute\n## Acceptance criteria\n${Array.from({ length: 6 }, (_, i) => `- [ ] step ${i}`).join("\n")}\n`,
+      );
+
+      const messages = [
+        userMsg(`/autopilot ENG-9999: fix per ${absPlanPath}`),
+        assistantMsg("starting"),
+      ];
+      const client = mockClientWithMessages(messages);
+      const handlers = await factory({ client, directory: worktreeDir });
+      await handlers.event({
+        event: { type: "session.idle", properties: { sessionID: "s1" } },
+      });
+
+      assert.equal(client.prompts.length, 1, "should nudge exactly once");
+      assert.match(
+        client.prompts[0].text,
+        /\[autopilot\] Plan has 6 unchecked/,
+        "plugin should have read the absolute plan file and counted items",
+      );
+    } finally {
+      rmTmpDir(worktreeDir);
+      rmTmpDir(planRootDir);
+    }
+});
+
+test("findPlanPath prefers the most recent reference across mixed legacy+absolute messages", async () => {
+    // A session might contain both a legacy reference (early message) and
+    // a later absolute path (after plans migrated). findPlanPath scans
+    // newest-to-oldest and returns the first match — so the latest shape wins.
+    const { findPlanPath } = await import(PLUGIN_PATH);
+    const messages = [
+        msgWithText("user", "/autopilot see .agent/plans/legacy.md"),
+        msgWithText("assistant", "working"),
+        msgWithText(
+          "user",
+          "actually use /Users/me/.glorious/opencode/my-repo/plans/current.md instead",
+        ),
+    ];
+    const match = findPlanPath(messages);
+    assert.ok(match, "expected a match");
+    assert.ok(
+      match.endsWith("/plans/current.md"),
+      `expected the newest (absolute) reference to win, got ${match}`,
+    );
+});
+
+test("runtime reader uses path.isAbsolute: absolute plan path is read as-is", async () => {
+    // Regression: a naive `path.join(worktreeDir, planPath)` would CORRUPT
+    // the absolute path by concatenating the worktree dir in front of it.
+    // This test verifies that autopilot reads the plan from the actual
+    // absolute location (not `<worktree>/<absolute-path>`) by placing the
+    // fixture at the absolute path ONLY and checking the nudge fires.
+    const { default: factory } = await import(PLUGIN_PATH);
+    const worktreeDir = mkTmpDir();
+    const planRootDir = mkTmpDir("autopilot-plan-root-");
+    try {
+      const absPlanPath = path.join(
+        planRootDir,
+        "isolated-repo",
+        "plans",
+        "standalone.md",
+      );
+      fs.mkdirSync(path.dirname(absPlanPath), { recursive: true });
+      fs.writeFileSync(
+        absPlanPath,
+        "# Standalone\n## Acceptance criteria\n- [ ] only\n",
+      );
+
+      // NB: the plan fixture is ONLY at the absolute path — nothing is
+      // written inside `worktreeDir/.agent/plans/...`. If the plugin
+      // were using `path.join(worktreeDir, absPlanPath)` (the broken
+      // shape), it would try to read e.g.
+      // `/tmp/worktree/tmp/plan-root/isolated-repo/plans/standalone.md`,
+      // which does NOT exist — no nudge would fire.
+      const messages = [
+        userMsg(`/autopilot iso-1 per ${absPlanPath}`),
+        assistantMsg("go"),
+      ];
+      const client = mockClientWithMessages(messages);
+      const handlers = await factory({ client, directory: worktreeDir });
+      await handlers.event({
+        event: { type: "session.idle", properties: { sessionID: "s1" } },
+      });
+
+      assert.equal(
+        client.prompts.length,
+        1,
+        "plugin must have read the absolute plan file (path.isAbsolute branch)",
+      );
+      assert.match(client.prompts[0].text, /\[autopilot\] Plan has 1 unchecked/);
+    } finally {
+      rmTmpDir(worktreeDir);
+      rmTmpDir(planRootDir);
+    }
+});
+
+test("session.idle: legacy .agent/plans/<slug>.md still triggers autopilot nudge (backward compat)", async () => {
+    // Regression guard: sessions that started before the plan-storage
+    // migration may still have `.agent/plans/<slug>.md` references
+    // lingering in their chat transcript. `findPlanPath` must continue
+    // to match this shape, and the runtime reader must anchor the
+    // relative path against the worktree directory (not pass through as
+    // absolute). This asserts the full end-to-end legacy path works.
+    const { default: factory } = await import(PLUGIN_PATH);
+    const dir = mkTmpDir();
+    try {
+      writeFixture(
+        dir,
+        ".agent/plans/legacy-slug.md",
+        "# Legacy\n## Acceptance criteria\n- [ ] one\n- [ ] two\n- [ ] three\n",
+      );
+      const messages = [
+        userMsg(
+          "/autopilot ENG-legacy: continue per .agent/plans/legacy-slug.md",
+        ),
+        assistantMsg("starting legacy flow"),
+      ];
+      const client = mockClientWithMessages(messages);
+      const handlers = await factory({ client, directory: dir });
+      await handlers.event({
+        event: { type: "session.idle", properties: { sessionID: "s1" } },
+      });
+      assert.equal(client.prompts.length, 1, "legacy path should still nudge");
+      assert.match(
+        client.prompts[0].text,
+        /\[autopilot\] Plan has 3 unchecked/,
+        "plugin must have read the legacy plan file via path.join(worktreeDir, relativePath)",
+      );
+    } finally {
+      rmTmpDir(dir);
+    }
 });

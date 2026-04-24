@@ -49,7 +49,7 @@ When `@qa-reviewer` returns `[PASS]` in Phase 4, emit the literal token `<promis
 ## Rule 6 — Verifier invocation
 
 IMMEDIATELY after emitting `<promise>DONE</promise>` — in the same turn, or the next if the session re-prompts — delegate to `@autopilot-verifier` via the task tool. Pass:
-- The plan path (`.agent/plans/<slug>.md`)
+- The plan path (the absolute path under the repo-shared plan directory — e.g. `~/.glorious/opencode/<repo>/plans/<slug>.md`)
 - A 2-3 sentence summary of what was done (what changed, what was verified)
 
 Wait for the verifier's reply in the same session. The verifier is self-driven from your Phase 4 → verification → Phase 5 flow; it is NOT contingent on any plugin event. Under Claude Code (no plugin events), this rule is still what drives the verifier call.
@@ -58,7 +58,7 @@ Wait for the verifier's reply in the same session. The verifier is self-driven f
 
 The verifier returns one of two sentinel tokens on its own line:
 
-- `[AUTOPILOT_VERIFIED]` → proceed to Phase 5 and emit the standard handoff (which ends with `Run /ship .agent/plans/<slug>.md to finalize`).
+- `[AUTOPILOT_VERIFIED]` → proceed to Phase 5 and emit the standard handoff (which ends with `Run /ship <plan-path> to finalize`).
 - `[AUTOPILOT_UNVERIFIED]` followed by numbered reasons → address each reason literally. DO NOT argue with the verdict. DO NOT try to explain why the reason is wrong. Fix the code, re-run verification, then re-emit `<promise>DONE</promise>` to re-invoke the verifier.
 
 There is no retry limit on verifier rounds at the orchestrator level — the iteration budget is enforced by the `autopilot.ts` plugin (max 20 iterations, see autopilot.md § 4).
@@ -196,7 +196,7 @@ When the argument names a scope containing multiple issues — a Linear project,
 - What was classified — **which tracker resolved it** (e.g., `Linear ENG-1234 "Add OAuth flow"`, `GitHub #456 "Fix timezone bug"`, `Jira PROJ-42 "Migrate to Postgres 16"`) or the free-form summary, or "question-only"
 - Plan path if created
 - Summary of changes (1-2 sentences)
-- Exact command to ship: `/ship .agent/plans/<slug>.md`
+- Exact command to ship: `/ship <plan-path>` (the absolute path the plan agent returned)
 
 **Sequence mode** — your single handoff message should include:
 - The queue source: `Linear project <name>` / `GitHub milestone #<N>` / `next N issues in <project>`
@@ -211,14 +211,14 @@ Example sequence-mode handoff format:
 Sequence complete: Linear project "RCM Rule Engine" (3 of 5 refs processed)
 
 - GEN-1127 [Phase 1]: skipped — PR #1304 already open
-- GEN-1128 [Phase 2]: completed — plan at .agent/plans/gen-1128-phase-2-portal-mapping.md
-- GEN-1129 [Phase 3a]: completed — plan at .agent/plans/gen-1129-phase-3a-schema.md
+- GEN-1128 [Phase 2]: completed — plan at ~/.glorious/opencode/<repo>/plans/gen-1128-phase-2-portal-mapping.md
+- GEN-1129 [Phase 3a]: completed — plan at ~/.glorious/opencode/<repo>/plans/gen-1129-phase-3a-schema.md
 - GEN-1130 [Phase 3b]: halted — orchestrator hit MAX_ITERATIONS on failing migration test
 - GEN-1131 [Phase 3c]: not attempted (sequence halted before)
 
 Ready to ship:
-  /ship .agent/plans/gen-1128-phase-2-portal-mapping.md
-  /ship .agent/plans/gen-1129-phase-3a-schema.md
+  /ship ~/.glorious/opencode/<repo>/plans/gen-1128-phase-2-portal-mapping.md
+  /ship ~/.glorious/opencode/<repo>/plans/gen-1129-phase-3a-schema.md
 
 To resume sequence: resolve the GEN-1130 test failure, then re-run `/autopilot <project-ref>`
 Full log: .agent/autopilot-sequence-log.md

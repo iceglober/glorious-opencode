@@ -301,13 +301,36 @@ async function writeState(dir: string, state: AutopilotState): Promise<void> {
 
 type RawMessage = { info: any; parts: Array<any> };
 
+// Plan paths come in two shapes:
+//
+//   1. Legacy (per-worktree):
+//        .agent/plans/<slug>.md
+//
+//   2. Repo-shared (current, since the plan-storage migration):
+//        <absolute-prefix>/<repo-folder>/plans/<slug>.md
+//        e.g. /Users/alice/.glorious/opencode/my-repo/plans/fix-bug.md
+//
+// The regex matches BOTH shapes so autopilot can still latch onto plan
+// references in older sessions / legacy fixtures. Constraints:
+//   - slug matches `[\w-]+` (letters, digits, underscore, dash)
+//   - path ends in `.md`
+//   - prefix is either `.agent/plans/` (legacy) or any non-whitespace run
+//     ending in `/plans/` whose preceding segment is a repo-folder token
+//     (`[\w.-]+`). This filters out noise like `foo/plans/bar.md` buried
+//     in a sentence while still catching every legitimate absolute path.
+//
+// We scan messages newest-to-oldest and alternation is left-to-right, so
+// the first match wins — legacy references surface first when present,
+// which matches the pre-migration behavior.
+const PLAN_PATH_RE =
+  /(?:\.agent\/plans\/[\w-]+\.md|(?:\/[^\s`"']*)?\/[\w.-]+\/plans\/[\w-]+\.md)/;
+
 function findPlanPath(messages: RawMessage[]): string | null {
-  const re = /\.agent\/plans\/[\w-]+\.md/;
   for (let i = messages.length - 1; i >= 0; i--) {
     const parts = messages[i].parts ?? [];
     for (const part of parts) {
       if (part.type === "text" && typeof part.text === "string") {
-        const m = part.text.match(re);
+        const m = part.text.match(PLAN_PATH_RE);
         if (m) return m[0];
       }
     }
@@ -959,8 +982,14 @@ const plugin: Plugin = async ({ client, directory }) => {
       if (promise) {
         if (!sessState.verification_pending) {
           // First observation of DONE — ask the orchestrator to invoke the verifier.
+          // Template fallback when no plan reference or state exists
+          // yet. Callers treat this as a human-readable hint, not a real
+          // filesystem path. `<plan-path>` tells the orchestrator to
+          // resolve the repo-shared plan dir (via `bunx
+          // @glrs-dev/harness-opencode plan-dir`) and point at the
+          // matching slug.
           const planPathForPrompt =
-            findPlanPath(messages) ?? sessState.lastPlanPath ?? ".agent/plans/<slug>.md";
+            findPlanPath(messages) ?? sessState.lastPlanPath ?? "<plan-path>";
           const sent = await sendNudgeDebounced(
             client,
             sessionID,
@@ -986,8 +1015,9 @@ const plugin: Plugin = async ({ client, directory }) => {
         const verdict = findVerifierVerdict(messages, promise.msgIdx);
 
         if (verdict === "VERIFIED") {
+          // Same template-fallback rationale as above.
           const planPathForComplete =
-            findPlanPath(messages) ?? sessState.lastPlanPath ?? ".agent/plans/<slug>.md";
+            findPlanPath(messages) ?? sessState.lastPlanPath ?? "<plan-path>";
           const sent = await sendNudgeDebounced(
             client,
             sessionID,
@@ -1063,9 +1093,20 @@ const plugin: Plugin = async ({ client, directory }) => {
       const planPath = findPlanPath(messages);
       if (!planPath) return;
 
+      // Plan paths may be legacy-relative (`.agent/plans/<slug>.md`) or
+      // absolute (`~/.glorious/opencode/<repo>/plans/<slug>.md`) — after
+      // the plan-storage migration both shapes can appear in chat. Use
+      // `path.isAbsolute` to decide whether to anchor against the
+      // worktree directory or pass through as-is. `path.join(cwd, abs)`
+      // would be wrong because Node concatenates rather than preserving
+      // the absolute-ness of the second argument.
+      const resolvedPlanPath = path.isAbsolute(planPath)
+        ? planPath
+        : path.join(directory, planPath);
+
       let planContent: string;
       try {
-        planContent = await fs.readFile(path.join(directory, planPath), "utf8");
+        planContent = await fs.readFile(resolvedPlanPath, "utf8");
       } catch {
         return;
       }

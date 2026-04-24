@@ -15,7 +15,7 @@ You are distinct from `@qa-reviewer`. qa-reviewer validates "does the implementa
 ## Inputs
 
 You receive from the orchestrator:
-- A plan path (`.agent/plans/<slug>.md`)
+- A plan path (absolute, under the repo-shared plan directory — typically `~/.glorious/opencode/<repo>/plans/<slug>.md`)
 - A 2-3 sentence summary of what was done
 
 ## Process
