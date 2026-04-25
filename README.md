@@ -1,34 +1,34 @@
 # @glrs-dev/harness-opencode
 
-An opinionated OpenCode agent harness — orchestrator, plan, build, QA, skills, MCP wiring, hashline editing. Delivered as a single npm plugin.
+An opinionated OpenCode agent harness delivered as a single npm package. Two usage modes:
 
-## What is it?
+1. **OpenCode plugin** — registers agents, slash commands, tools, MCPs, and skills into your OpenCode session. Interactive, human-in-the-loop.
+2. **Pilot CLI** — runs a task DAG fully unattended against a real OpenCode server. Plan a ticket, validate the DAG, execute it, review the results.
 
-`@glrs-dev/harness-opencode` is an OpenCode plugin that registers agents, slash commands, custom tools, MCP servers, and skills at runtime via the OpenCode plugin `config` hook. Zero files are written to your `~/.config/opencode/` directory (except a single plugin-array entry in `opencode.json`).
+Both modes ship in the same package. You can use one or both.
 
-**Phase A (current):** OpenCode-only. Claude Code support is Phase B.
+---
 
-## What you get
+## Mode 1: OpenCode Plugin
 
-- **Primary agents** — `orchestrator` (five-phase end-to-end), `plan` (interactive planner), `build` (plan executor)
-- **Pilot agents** — `pilot-builder` (unattended task executor, mid tier), `pilot-planner` (decomposes tickets into a `pilot.yaml` DAG, deep tier)
-- **Subagents** — `gap-analyzer`, `plan-reviewer`, `qa-reviewer`, `code-searcher`, `lib-reader`, `architecture-advisor`, `docs-maintainer`, `agents-md-writer`
-- **Slash commands** — `/ship`, `/autopilot`, `/review`, `/init-deep`, `/research`, `/fresh`, `/costs`
-- **Generic skills** — `review-plan`, `web-design-guidelines`, `vercel-react-best-practices`, `vercel-composition-patterns`
-- **Pilot skills** — `pilot-planning` (7-rule decomposition framework for YAML plan authoring)
-- **OpenCode tools** — `ast_grep`, `tsc_check`, `eslint_check`, `todo_scan`, `comment_check`
-- **Bundled sub-plugins** — `notify` (OS notifications for question tool), `autopilot` (opt-in completion-tag loop driver with skeptical verifier gate — only activates on explicit `/autopilot` invocation, never on normal orchestrator sessions), `cost-tracker` (running LLM spend by provider/model at `~/.glorious/opencode/costs.json`; view with `/costs`; disable with `GLORIOUS_COST_TRACKER=0`, override path with `GLORIOUS_COST_TRACKER_DIR`), `pilot-plugin` (runtime invariant enforcement for pilot builder/planner agents)
-- **Pilot CLI** — `bunx @glrs-dev/harness-opencode pilot <verb>` with verbs: `validate`, `plan`, `build`, `status`, `resume`, `retry`, `logs`, `worktrees`, `cost`, `plan-dir`
-- **MCP server wiring** — `serena` (AST code intel), `memory` (per-repo JSON memory, worktree-shared), `git` (structured blame/log). `playwright` and `linear` defined but disabled — flip a flag to enable.
-- **Hashline edit system** — line-reference prefixes that validate content hashes before every edit. Requires `opencode-hashline` (separate plugin, auto-preserved by our installer).
+### What you get
 
-## Install
+When OpenCode starts, the plugin injects:
+
+- **14 agents** — `orchestrator` (five-phase end-to-end), `plan` (interactive planner), `build` (plan executor), `qa-reviewer`, `qa-thorough`, `plan-reviewer`, `gap-analyzer`, `code-searcher`, `architecture-advisor`, `docs-maintainer`, `lib-reader`, `agents-md-writer`, `pilot-builder`, `pilot-planner`
+- **7 slash commands** — `/ship`, `/autopilot`, `/review`, `/init-deep`, `/research`, `/fresh`, `/costs`
+- **5 custom tools** — `ast_grep`, `tsc_check`, `eslint_check`, `todo_scan`, `comment_check`
+- **5 MCP servers** — `serena` (AST code intel), `memory` (per-repo JSON memory), `git` (structured blame/log). `playwright` and `linear` defined but disabled by default.
+- **5 skill bundles** — `review-plan`, `web-design-guidelines`, `vercel-react-best-practices`, `vercel-composition-patterns`, `pilot-planning`
+- **4 sub-plugins** — `autopilot` (opt-in completion loop), `notify` (OS notifications), `cost-tracker` (LLM spend tracking), `pilot-plugin` (runtime invariant enforcement)
+
+### Install
 
 ```bash
 bunx @glrs-dev/harness-opencode install
 ```
 
-This adds `"@glrs-dev/harness-opencode"` to your `~/.config/opencode/opencode.json` `plugin` array non-destructively. Your existing plugins and settings are preserved. A `.bak.<epoch>-<pid>` backup is written before any mutation.
+This adds `"@glrs-dev/harness-opencode"` to the `plugin` array in `~/.config/opencode/opencode.json`. Your existing plugins and settings are preserved. A `.bak` backup is written before any mutation.
 
 Or add it manually:
 
@@ -38,17 +38,19 @@ Or add it manually:
 }
 ```
 
-## Update
+No global install required. OpenCode's plugin loader resolves the package from its own cache.
+
+### Use
 
 ```bash
-bun update @glrs-dev/harness-opencode
+opencode
 ```
 
-Or if you're using floating semver in your `opencode.json`, OpenCode's internal `bun install` step handles it on startup.
+That's it. The `orchestrator` agent is the default. All agents, commands, tools, MCPs, and skills are available immediately.
 
-## Customize
+### Customize
 
-**Agents, commands, MCPs:** user's `opencode.json` overrides take precedence over plugin-injected defaults. To override the orchestrator model:
+**Agents, commands, MCPs:** your `opencode.json` overrides win. To swap the orchestrator model:
 
 ```json
 {
@@ -60,85 +62,165 @@ Or if you're using floating semver in your `opencode.json`, OpenCode's internal 
 }
 ```
 
-**Skills:** skills are read-only by design (they live in `node_modules`, owned by npm). To customize a skill, fork this package, modify the skill, publish your fork, and swap the plugin entry.
+**Model tiers:** override all agents in a tier at once via `harness.models`:
 
-## Pilot subsystem
+```json
+{
+  "harness": {
+    "models": {
+      "deep": ["bedrock/claude-opus-4"],
+      "mid": ["bedrock/claude-sonnet-4"],
+      "fast": ["bedrock/claude-haiku-4"]
+    }
+  }
+}
+```
 
-The pilot subsystem runs a `pilot.yaml` task DAG against a real OpenCode server, fully unattended. You define tasks with dependencies, touch-globs, and verify commands; the pilot worker executes them in topological order using isolated git worktrees.
+Per-agent overrides in `harness.models` win over tier. Direct `agent.<name>.model` overrides in `opencode.json` win over everything.
+
+**Skills:** read-only by design (they live in `node_modules`). To customize, fork the package.
+
+---
+
+## Mode 2: Pilot CLI
+
+The pilot subsystem runs a `pilot.yaml` task DAG fully unattended. You define tasks with dependencies, touch-globs, and verify commands; the pilot worker executes them in topological order using isolated git worktrees.
+
+### Prerequisites
+
+Everything from Mode 1 (the plugin must be installed so the `pilot-builder` and `pilot-planner` agents are available), plus:
+
+- `git` >= 2.5 (for `git worktree` support)
+- `opencode` CLI on PATH
+
+### Install
+
+The plugin install from Mode 1 is sufficient — the pilot CLI ships in the same package. To invoke it:
+
+```bash
+# Via bunx (no global install needed)
+bunx @glrs-dev/harness-opencode pilot <verb>
+
+# Or install globally for a shorter command
+bun add -g @glrs-dev/harness-opencode
+glrs-oc pilot <verb>
+```
+
+The global install is optional but recommended if you use pilot regularly. It also avoids a known issue where `bunx` can spawn Node.js instead of Bun on some systems.
 
 ### Quick start
 
 ```bash
 # 1. Create a plan interactively (spawns OpenCode TUI with the pilot-planner agent)
-bunx @glrs-dev/harness-opencode pilot plan
+glrs-oc pilot plan "Add user auth with OAuth"
 
 # 2. Validate the plan (schema, DAG cycles, glob conflicts)
-bunx @glrs-dev/harness-opencode pilot validate pilot.yaml
+glrs-oc pilot validate
 
-# 3. Run the plan
-bunx @glrs-dev/harness-opencode pilot build pilot.yaml
+# 3. Run the plan (single worker, isolated worktrees, fully unattended)
+glrs-oc pilot build
 
 # 4. Check progress
-bunx @glrs-dev/harness-opencode pilot status
+glrs-oc pilot status
 ```
 
 ### CLI verbs
 
 | Verb | Description |
 |------|-------------|
-| `validate` | Validate a `pilot.yaml` against schema, DAG, and glob rules |
-| `plan` | Spawn the OpenCode TUI with the `pilot-planner` agent |
-| `build` | Run the pilot worker against a plan |
-| `status` | Print the current run's task statuses |
-| `resume` | Continue a partially-completed run |
-| `retry` | Reset a single task and re-run |
-| `logs` | Print events / verify outputs for a task |
-| `worktrees` | List / prune managed worktrees |
-| `cost` | Print per-task and total cost for a run |
-| `plan-dir` | Print the resolved plan directory path |
+| `plan [input]` | Spawn the OpenCode TUI with the `pilot-planner` agent. Input can be a Linear ID, GitHub URL, or text description. |
+| `validate [path]` | Validate a `pilot.yaml` against schema, DAG, and glob rules. Defaults to newest plan. |
+| `build` | Run the pilot worker against a plan. `--plan <path>`, `--dry-run`, `--filter <id>`. |
+| `status` | Print the current run's task statuses. `--run <id>`, `--json`. |
+| `resume` | Continue a partially-completed run. Skips succeeded tasks. |
+| `retry <task-id>` | Reset a single task to pending and optionally re-run. `--run-now`. |
+| `logs <task-id>` | Print events and verify outputs for a task. |
+| `worktrees list\|prune` | List or prune git worktrees managed by pilot. |
+| `cost` | Print per-task and total LLM cost for a run. `--json`. |
+| `plan-dir` | Print the resolved plan directory path (creates if missing). |
 
-Persistent state (SQLite DB, git worktrees, JSONL logs, YAML plans) lives under `~/.glorious/opencode/<repo>/pilot/`.
+### State storage
 
-> **v0.1 limitation:** single-worker only. `--workers >1` clamps to 1. Multi-worker pool, conflict-aware parallel scheduling, and cost-cap preemption are deferred to v0.3+.
+All pilot state lives under `~/.glorious/opencode/<repo>/pilot/`:
 
-## Rollback
+```
+pilot/
+  plans/                  # YAML plans (input artifacts)
+  runs/<runId>/
+    state.db              # SQLite (runs, tasks, events)
+    workers/00.jsonl      # per-worker structured logs
+  worktrees/<runId>/00/   # git worktree for task execution
+```
 
-To pin to a specific version:
+The `<repo>` segment is derived from `git rev-parse --git-common-dir`, so worktrees of the same repo share state. Override with `$GLORIOUS_PILOT_DIR`.
+
+> **v0.1 limitation:** single worker only. `--workers >1` clamps to 1. Multi-worker parallel scheduling is deferred to v0.3+.
+
+---
+
+## Shared operations
+
+### Update
+
+```bash
+bun update @glrs-dev/harness-opencode
+```
+
+Or if you're using floating semver in `opencode.json`, OpenCode's internal `bun install` handles it on startup.
+
+### Health check
+
+```bash
+bunx @glrs-dev/harness-opencode doctor
+# or
+glrs-oc doctor
+```
+
+### Pin to a specific version
 
 ```bash
 bunx @glrs-dev/harness-opencode install --pin
 ```
 
-This injects `"@glrs-dev/harness-opencode@<current-version>"` into your plugin array. OpenCode's plugin loader accepts `name@version` and `name@^semver` specifiers.
+Injects `"@glrs-dev/harness-opencode@<current-version>"` into your plugin array.
 
-For a broken release: `npm deprecate @glrs-dev/harness-opencode@<broken> "<reason>"` + patch publish. Users on floating semver auto-recover on next `bun update`.
+### Rollback a broken release
 
-## Uninstall
+```bash
+npm deprecate @glrs-dev/harness-opencode@<broken> "<reason>"
+```
+
+Then ship a patch. Users on floating semver auto-recover on next `bun update`.
+
+### Uninstall
 
 ```bash
 bunx @glrs-dev/harness-opencode uninstall
 ```
 
-Removes the plugin entry from `opencode.json`. Skills live in `node_modules` — removed by `bun remove @glrs-dev/harness-opencode`.
+Removes the plugin entry from `opencode.json`. To also remove the package: `bun remove @glrs-dev/harness-opencode`.
 
 ## Migrating from the old clone+symlink install
 
-If you were using the previous `install.sh`-based harness (the `~/.glorious/opencode/` clone), see [docs/migration-from-clone-install.md](docs/migration-from-clone-install.md).
+If you were using the previous `install.sh`-based harness, see [docs/migration-from-clone-install.md](docs/migration-from-clone-install.md).
 
 ## Privacy
 
-The plugin checks `registry.npmjs.org` once per day to see if a newer version is available. No analytics, no telemetry, no identifiers beyond what `fetch()` sends. Opt out: `export HARNESS_OPENCODE_UPDATE_CHECK=0`.
+The plugin checks `registry.npmjs.org` once per day for newer versions. No analytics, no telemetry, no identifiers beyond what `fetch()` sends. Opt out: `export HARNESS_OPENCODE_UPDATE_CHECK=0`.
 
 ## Prerequisites
 
-- OpenCode (install from https://opencode.ai)
-- `bun` or `npm` (for plugin installation)
+- [OpenCode](https://opencode.ai)
+- `bun` (for plugin installation and CLI)
 - `uvx` (for serena + git MCPs — `brew install uv`)
 - `node`/`npx` (for memory MCP)
+- `git` >= 2.5 (for pilot worktrees)
 
 ## Contributing
 
-Pull requests welcome. Before submitting, read [`AGENTS.md`](./AGENTS.md) — it covers the plugin architecture, type-surface escape hatches, and the zero-user-filesystem-writes invariant.
+Pull requests welcome. Read [`AGENTS.md`](./AGENTS.md) for plugin architecture, type-surface escape hatches, and the zero-user-filesystem-writes invariant.
+
+All user-visible PRs require a changeset: `bunx changeset` before opening the PR. See [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## License
 
