@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * @glrs-dev/harness-opencode CLI entry point.
  *
