@@ -712,6 +712,29 @@ describe("prompt content assertions", () => {
     expect(prime).not.toContain("> 30 hits");
   });
 
+  // ---- context firewall + delegation strengthening ----
+
+  it("orchestrator prompt contains context firewall section", () => {
+    expect(orchestrator).toContain("Context firewall");
+    expect(orchestrator).toContain("Mandatory delegation triggers");
+  });
+
+  it("orchestrator prompt delegates full test suites instead of running directly", () => {
+    // Phase 4 should NOT instruct running the full test suite directly
+    expect(orchestrator).not.toContain(
+      "Run the project's test command. It must pass.",
+    );
+    // Should instruct delegation to QA reviewer
+    expect(orchestrator).toContain(
+      "Do NOT run the full test suite, lint, or typecheck directly in the orchestrator",
+    );
+  });
+
+  it("orchestrator prompt uses strengthened delegation threshold (> 10 files, not > 30 hits)", () => {
+    expect(orchestrator).toContain("> 10 files");
+    expect(orchestrator).not.toContain("> 30 hits");
+  });
+
   // ---- Plan-storage migration regression guards (a7 in the
   // plans-repo-shared-storage plan) ----
   //
