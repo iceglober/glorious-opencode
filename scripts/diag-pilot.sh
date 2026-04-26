@@ -33,4 +33,4 @@ echo "→ Diagnostic enabled. Raw SSE events logging to: $PILOT_EVENT_LOG" >&2
 echo "→ Using local build: $CLI_PATH" >&2
 echo >&2
 
-exec node "$CLI_PATH" pilot "$@"
+exec bun "$CLI_PATH" pilot "$@"
